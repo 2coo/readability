@@ -1,4 +1,4 @@
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, NavigableString, Comment
 import re
 import copy
 
@@ -24,9 +24,12 @@ class Readability:
 	def __init__(self, html, preserveUnlikelyCandidates = False):
 		self.html = html
 		self.preserveUnlikelyCandidates = preserveUnlikelyCandidates
+		self.title = ''
+		self.article = ''
 		self.soup = None
 
 	def minify(self, html):
+		# minified = re.sub('\n+','\n',re.sub('\n+','\n',re.sub(' +',' ',re.sub('\t','',html))))
 		minified = re.sub('\n+','\n',re.sub('<!--.*?-->','',re.sub('<script.*?</script>','',re.sub('<script.*?[^>]*</script>','',re.sub('<!--[^>]*-->','',re.sub(' <','<',re.sub('> ','>',re.sub('> <','><',re.sub(' +',' ',re.sub('\t','',html)))))))).strip()))
 		return minified
 		
@@ -105,6 +108,68 @@ class Readability:
 			except KeyError:
 				continue
 		return linkLength / textLength
+	
+	def getArticleMetadata(self):
+		metadata = {}
+		values = {}
+		# property is a space-separated list of values
+		propertyPattern = "\s*(dc|dcterm|og|twitter)\s*\:\s*(author|creator|description|title|site_name|type)\s*"
+
+		# name is a single value
+		namePattern = "^\s*(?:(dc|dcterm|og|twitter|weibo:(article|webpage))\s*[\.:]\s*)?(author|creator|description|title|site_name|type)\s*$"
+
+		for meta in self.soup.find_all('meta'):
+			elementName = meta.get("name", "")
+			elementProperty = meta.get("property", "")
+			content = meta.get("content", "")
+			matches = None
+			name = None
+			matches = re.findall(propertyPattern, elementProperty)
+
+			if elementProperty:
+				if matches:
+					for match in matches:
+						if isinstance(match, tuple):
+							name = ":".join(list(match)).replace("\s", '')
+						else:
+							name = match.lower().replace('\s', '')
+						values[name] = content.strip()
+			if not matches and elementName and re.search(namePattern, elementName):
+				name = elementName
+				if content:
+					name = name.lower().replace('\s', '').replace('.', ':')
+					values[name] = content.strip()
+
+		metadata = {
+			# get title
+			"title": values.get("dc:title") or
+                     values.get("dcterm:title") or
+                     values.get("og:title") or
+                     values.get("weibo:article:title") or
+                     values.get("weibo:webpage:title") or
+                     values.get("title") or
+                     values.get("twitter:title"),
+			# get author
+			"byline": values.get("dc:creator") or
+                      values.get("dcterm:creator") or
+                      values.get("author"),
+			# get description
+			"excerpt": values.get("dc:description") or
+                       values.get("dcterm:description") or
+                       values.get("og:description") or
+                       values.get("weibo:article:description") or
+                       values.get("weibo:webpage:description") or
+                       values.get("description") or
+                       values.get("twitter:description"),
+			# get type
+			"type": values.get("og:type", "default"),
+			# get site name
+			"siteName": values.get("og:site_name")
+		}
+
+		return metadata
+
+
 
 	# def get_own_textContent(element):
 	# 	textContent=''
@@ -118,9 +183,24 @@ class Readability:
 	# 	else:
 	# 		return re.sub('\n+','\n', textContent.strip())
 
+
+	@staticmethod
+	def removeScripts(soup):
+		[s.extract() for s in soup('script')]
+		return soup
+	@staticmethod
+	def removeComments(soup):
+		for element in soup.find_all():
+			if isinstance(element, Comment):
+				element.extract()
+		return soup
+	@staticmethod
+	def removeElements(soup):
+		for element in soup:
+			element.extract()
+		return soup
+
 	def grabArticle(self):
-		html = self.minify(self.html)
-		self.soup = BeautifulSoup(html, 'html.parser')
 		for node in self.soup.findAll():
 			continueFlag = False
 			if not self.preserveUnlikelyCandidates:
@@ -152,9 +232,6 @@ class Readability:
 			grandParentNode = parentNode.parent
 			InnerText = self.getInnerText(paragraph)
 
-			# print("##########")
-			# print(parentNode)
-
 			if len(InnerText) < 25:
 				continue
 			if not parentNode.has_attr('readability-score'):
@@ -175,7 +252,7 @@ class Readability:
 			parentNode['readability-score'] += contentScore;
 			grandParentNode['readability-score'] += contentScore / 2;
 
-		topCandidate = None
+		topCandidate = {}
 		# get top candidate
 		for candidate in candidates:
 			candidate['readability-score'] = candidate['readability-score'] * (1 - self.getLinkDensity(candidate))
@@ -219,6 +296,25 @@ class Readability:
 			return articleContent
 		else:
 			return topCandidate
-	def get_scored_html(self):
-		self.grabArticle()
-		return self.soup
+	
+	def parse(self):
+		### MINIFY HTML
+		html = self.minify(self.html)
+
+		self.soup = BeautifulSoup(html, 'html5lib')
+		self.soup = self.removeScripts(self.soup)
+		self.soup = self.removeComments(self.soup)
+
+		self.removeElements(self.soup.find_all('style'))
+
+		metadata = self.getArticleMetadata()
+		article = self.grabArticle()
+
+		
+
+		return {
+			**metadata,
+			# "textContent": self.minify(article.get("text", "")),
+			"textContent": self.minify(article.text),
+			"content": str(article)
+		}
